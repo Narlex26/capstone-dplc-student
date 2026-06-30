@@ -1,6 +1,7 @@
 name: Deploy
 
-# Déploiement continu : build -> push image GHCR -> helm upgrade sur le VPS (k3s).
+# Déploiement continu : build -> push image GHCR -> envoi du chart sur le VPS (scp)
+# -> helm upgrade via SSH (k3s).
 # helm upgrade --install = CREATE (1er run) + UPDATE (runs suivants).
 on:
   push:
@@ -13,8 +14,6 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  RELEASE_NAME: worldcup
-  CHART_PATH: helm/worldcup
 
 jobs:
   build-and-push:
@@ -56,10 +55,25 @@ jobs:
             ${{ steps.meta.outputs.image }}:latest
 
   deploy:
-    name: Helm upgrade on VPS
+    name: Deploy chart to VPS (Helm)
     needs: build-and-push
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
+      # 1. Envoie le chart Helm (la "notice" de déploiement) sur le VPS.
+      #    Pas de git sur le VPS : le runner a déjà le repo, il copie le chart en scp.
+      - name: Copy Helm chart to VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          source: "helm/worldcup"
+          target: "worldcup-deploy"      # -> ~/worldcup-deploy/helm/worldcup sur le VPS
+          rm: true                        # nettoie la cible avant copie (pas de fichiers obsolètes)
+
+      # 2. Déploie : helm lit le chart copié, k3s tire l'image depuis GHCR.
       - name: helm upgrade --install via SSH
         uses: appleboy/ssh-action@v1.2.0
         env:
@@ -69,17 +83,15 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          envs: IMAGE,TAG,RELEASE_NAME,CHART_PATH
+          envs: IMAGE,TAG
           script: |
             set -euo pipefail
-            export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-            APP_DIR="${VPS_REPO_PATH:-$HOME/capstone-dplc-student}"
-            cd "$APP_DIR"
-            git fetch origin main
-            git reset --hard origin/main
-            helm upgrade --install "$RELEASE_NAME" "$CHART_PATH" \
+            # Le user deployer (non-root) utilise sa copie du kubeconfig k3s.
+            export KUBECONFIG="$HOME/.kube/config"
+            CHART_DIR="$HOME/worldcup-deploy/helm/worldcup"
+            helm upgrade --install worldcup "$CHART_DIR" \
               --namespace worldcup --create-namespace \
               --set app.image.repository="$IMAGE" \
               --set app.image.tag="$TAG" \
               --atomic --timeout 5m
-            kubectl -n worldcup rollout status deployment/${RELEASE_NAME}-worldcup --timeout=120s
+            kubectl -n worldcup rollout status deployment/worldcup-worldcup --timeout=120s

@@ -15,8 +15,10 @@ Kubernetes (k3s single-node, VPS Ikoula).
    merge main ────────────▶  deploy.yml  (push main)
                               ├─ docker build
                               ├─ push image ──▶ ghcr.io/<owner>/<repo>:<sha>
+                              ├─ scp du chart Helm ───────────▶ ~/worldcup-deploy/ (VPS)
                               └─ SSH ─────────────────────────▶ helm upgrade --install
                                                                  (k3s : 2 pods + HPA + Ingress + Postgres)
+                                                                 k3s pull l'image ◀── GHCR
 
    bouton manuel ─────────▶  destroy.yml (workflow_dispatch)
                               └─ SSH ─────────────────────────▶ helm uninstall
@@ -31,7 +33,7 @@ Couvre le cycle **create / update / destroy** exigé par la grille :
 | Fichier | Déclencheur | Rôle |
 |---------|-------------|------|
 | `.github/workflows/ci.yml` | tout push + PR | Tests jest (avec service PostgreSQL) + validation du build Docker. Ne déploie rien. |
-| `.github/workflows/deploy.yml` | push sur `main` + manuel | Build → push image sur GHCR → `helm upgrade --install` sur le VPS via SSH. |
+| `.github/workflows/deploy.yml` | push sur `main` + manuel | Build → push image sur GHCR → copie du chart sur le VPS (scp) → `helm upgrade --install` via SSH. |
 | `.github/workflows/destroy.yml` | manuel (avec confirmation) | `helm uninstall` sur le VPS. |
 
 ## Choix d'architecture (à défendre en soutenance)
@@ -41,6 +43,12 @@ Couvre le cycle **create / update / destroy** exigé par la grille :
 - **Déploiement par SSH + Helm** plutôt que kubeconfig exposé : l'API du cluster
   **reste privée**, le runner se contente d'ouvrir une session SSH. Moins de surface
   d'attaque, marche out-of-the-box avec k3s.
+- **Chart envoyé par scp** (pas de `git` sur le VPS) : le runner possède déjà le repo,
+  il copie le chart Helm au moment du déploiement. Le VPS n'a besoin que de `helm`,
+  `kubectl` et du kubeconfig — pas de clone, pas de credentials git côté serveur.
+- **Séparation image / chart** : l'**image** (l'artefact applicatif) transite par GHCR ;
+  le **chart Helm** (la recette de déploiement) est copié sur le VPS. Helm lit le chart
+  localement et k3s tire l'image depuis GHCR.
 - **Image taguée par le SHA du commit** : chaque déploiement est traçable et
   reproductible (rollback = redéployer un ancien SHA).
 - **`--atomic`** : en cas d'échec du déploiement, Helm rollback automatiquement →
@@ -56,18 +64,25 @@ Couvre le cycle **create / update / destroy** exigé par la grille :
 | Secret | Valeur | Exemple |
 |--------|--------|---------|
 | `VPS_HOST` | IP ou domaine du VPS | `51.x.x.x` |
-| `VPS_USER` | utilisateur SSH (accès au kubeconfig k3s) | `root` ou `debian` |
-| `VPS_SSH_KEY` | **clé privée** SSH complète (avec en-têtes BEGIN/END) | contenu de `~/.ssh/id_ed25519` |
+| `VPS_USER` | utilisateur SSH dédié au déploiement | `deployer` |
+| `VPS_SSH_KEY` | **clé privée** SSH dédiée (avec en-têtes BEGIN/END) | contenu de `~/.ssh/worldcup_deploy` |
 
-> Générer une paire dédiée : `ssh-keygen -t ed25519 -f deploy_key -N ""`, ajouter
-> `deploy_key.pub` dans `~/.ssh/authorized_keys` du VPS, et coller `deploy_key`
-> (la privée) dans `VPS_SSH_KEY`.
+> Générer une paire dédiée : `ssh-keygen -t ed25519 -C "github-actions-deploy" -f ~/.ssh/worldcup_deploy -N ""`,
+> ajouter `worldcup_deploy.pub` dans `~/.ssh/authorized_keys` du user `deployer` sur le
+> VPS, et coller `worldcup_deploy` (la privée) dans `VPS_SSH_KEY`.
 
 ### 2. Sur le VPS (prérequis côté serveur)
-- `git`, `helm` et `kubectl` installés, repo cloné dans `~/capstone-dplc-student`
-  (sinon définir la variable d'env `VPS_REPO_PATH`).
-- Le user SSH peut lire `/etc/rancher/k3s/k3s.yaml` (kubeconfig de k3s).
+- Un **utilisateur dédié** `deployer` (non-root, accès par clé uniquement).
+- `helm` et `kubectl` installés et disponibles dans le PATH de `deployer`.
+- Une **copie du kubeconfig k3s** lisible par `deployer` dans `~/.kube/config` :
+  ```bash
+  sudo mkdir -p /home/deployer/.kube
+  sudo cp /etc/rancher/k3s/k3s.yaml /home/deployer/.kube/config
+  sudo chown -R deployer:deployer /home/deployer/.kube
+  sudo chmod 600 /home/deployer/.kube/config
+  ```
 - `metrics-server` actif (inclus par défaut dans k3s) → nécessaire pour le HPA.
+- **Pas besoin de git ni de cloner le repo** : le chart est copié par scp à chaque déploiement.
 
 ### 3. Visibilité de l'image GHCR
 Après le 1er `deploy.yml`, le package apparaît dans
