@@ -18,6 +18,12 @@ const os = require('os');
 
 const CHECK_SCRIPT = path.resolve(__dirname, '../../teacher-tools/check-dockerfile.sh');
 
+// Ce test valide l'outil de notation de l'enseignant (teacher-tools/check-dockerfile.sh),
+// qui n'est PAS fourni dans le dépôt étudiant. On ne l'exécute que si le script est présent
+// (cas de l'évaluation par l'enseignant). Sinon il est ignoré (skip) pour ne pas casser la CI.
+const checkScriptAvailable = fs.existsSync(CHECK_SCRIPT);
+const itIfScript = checkScriptAvailable ? it : it.skip;
+
 /**
  * Generate a Dockerfile content from the given configuration.
  *
@@ -131,7 +137,7 @@ function computeExpectedScore(config) {
 }
 
 describe('Feature: capstone-cloud-resilience, Property 3: Détection correcte des bonnes pratiques Dockerfile', () => {
-  it('should compute a score exactly equal to the number of best practices present in the Dockerfile', async () => {
+  itIfScript('should compute a score exactly equal to the number of best practices present in the Dockerfile', async () => {
     await fc.assert(
       fc.asyncProperty(
         fc.record({

@@ -1,0 +1,74 @@
+# ============================================================
+# Valeurs par défaut du chart worldcup
+# Surchargez via --set ou un fichier -f values-prod.yaml
+# ============================================================
+
+app:
+  # Image poussée par la CI sur GitHub Container Registry (GHCR).
+  # repository est surchargé par la CI ; tag = SHA du commit déployé.
+  image:
+    repository: ghcr.io/OWNER/REPO        # <-- remplacé par la CI (--set app.image.repository=...)
+    tag: latest                            # <-- remplacé par la CI (--set app.image.tag=<sha>)
+    pullPolicy: IfNotPresent
+
+  # Haute disponibilité : 2 réplicas minimum (exigence du sujet).
+  replicaCount: 2
+
+  # Ressources : OBLIGATOIRES pour que l'autoscaling CPU (HPA) fonctionne.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+  # Autoscaling sur CPU (exigence Élasticité).
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 60
+
+# Secret d'accès au registre GHCR.
+# Si le package GHCR est PUBLIC -> laissez à false (rien à configurer).
+# Si le package est PRIVÉ -> mettez à true et créez le secret (voir RUNBOOK).
+imagePullSecrets:
+  enabled: false
+  name: ghcr-creds
+
+# Exposition sur internet via l'Ingress Traefik intégré à k3s.
+ingress:
+  enabled: true
+  className: traefik
+  host: ""              # ex: worldcup.mon-vps.fr OU l'IP publique en xip.io. Vide = pas de host (catch-all).
+  path: /
+  pathType: Prefix
+
+# ============================================================
+# PostgreSQL (in-cluster, persistant)
+# ============================================================
+postgres:
+  enabled: true
+  image: postgres:15
+  storage: 2Gi
+  storageClassName: local-path     # storageClass par défaut de k3s
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+# ============================================================
+# Connexion BDD partagée par l'app et postgres.
+# Le mot de passe vient du Secret (pas de credentials en clair dans les manifests déployés).
+# ============================================================
+database:
+  name: worldcup2026
+  user: postgres
+  # Mot de passe par défaut pour la démo. EN PROD : surcharger via --set database.password=...
+  # ou un secret externe. Ne pas committer un vrai secret.
+  password: postgres
+  port: 5432
