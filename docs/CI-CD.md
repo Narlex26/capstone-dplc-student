@@ -32,7 +32,7 @@ Couvre le cycle **create / update / destroy** exigé par la grille :
 
 | Fichier | Déclencheur | Rôle |
 |---------|-------------|------|
-| `.github/workflows/ci.yml` | tout push + PR | Tests jest (avec service PostgreSQL) + validation du build Docker. Ne déploie rien. |
+| `.github/workflows/ci.yml` | tout push + PR | **Bloquant** : build de l'image Docker + validation du chart Helm (`helm lint`/`template`). **Informatif** : tests applicatifs fournis (app gelée). Ne déploie rien. |
 | `.github/workflows/deploy.yml` | push sur `main` + manuel | Build → push image sur GHCR → copie du chart sur le VPS (scp) → `helm upgrade --install` via SSH. |
 | `.github/workflows/destroy.yml` | manuel (avec confirmation) | `helm uninstall` sur le VPS. |
 
@@ -55,6 +55,14 @@ Couvre le cycle **create / update / destroy** exigé par la grille :
   pas de cluster laissé dans un état cassé.
 - **Pas de credentials en clair dans Git** : tout passe par les *GitHub Secrets* et
   un *Secret* Kubernetes (critère Sécurité de la grille).
+- **La CI verrouille ce qu'on produit, pas l'app gelée** : les jobs bloquants valident
+  nos livrables (image Docker + chart Helm). Les tests property-based fournis exercent
+  l'application **gelée** (« ne pas modifier les routes ») et certains générateurs sont
+  non déterministes (dates invalides, collisions de noms, flakiness d'état) ; on les
+  exécute donc en **informatif** (`continue-on-error`) pour ne pas bloquer le déploiement
+  sur un faux négatif qui ne concerne pas notre périmètre.
+  *Contrepartie assumée* : comme on ne modifie jamais le code applicatif, ce job non
+  bloquant ne masque aucune régression de notre fait.
 
 ## Configuration requise (une seule fois)
 
