@@ -3,9 +3,8 @@ kind: Ingress
 metadata:
   name: express-ingress
   namespace: worldcup
-  annotations:
-    kubernetes.io/ingress.class: traefik
 spec:
+  ingressClassName: traefik
   rules:
   - http:
       paths:
