@@ -26,14 +26,23 @@ const validStages = ['Group Stage', 'Round of 16', 'Quarter-final', 'Semi-final'
 
 describe('Feature: capstone-cloud-resilience, Property 1: Round-trip d\'insertion de match', () => {
   let insertedData;
+  let server;
+
+  // Serveur HTTP persistant réutilisé sur toutes les itérations. Évite la race de
+  // supertest qui, avec request(app), démarre/arrête un serveur éphémère à chaque
+  // appel (100×) — source de 404 intermittents non déterministes.
+  beforeAll(() => {
+    server = app.listen(0);
+  });
+
+  afterAll((done) => {
+    jest.restoreAllMocks();
+    server.close(done);
+  });
 
   beforeEach(() => {
     insertedData = null;
     pool.query.mockReset();
-  });
-
-  afterAll(() => {
-    jest.restoreAllMocks();
   });
 
   it('should return HTTP 201 with an id and inserted data matches input for any valid match data', async () => {
@@ -45,29 +54,28 @@ describe('Feature: capstone-cloud-resilience, Property 1: Round-trip d\'insertio
           score_home: fc.nat(),
           score_away: fc.nat(),
           stage: fc.constantFrom(...validStages),
+          // noInvalidDate : exclut `new Date(NaN)`, qui n'est pas une donnée valide
+          // et ferait planter toISOString() avant même d'appeler l'app.
           date: fc.date({
             min: new Date('2000-01-01'),
             max: new Date('2099-12-31'),
+            noInvalidDate: true,
           }),
         }),
         async (matchData) => {
           const dateStr = matchData.date.toISOString().split('T')[0];
           let capturedInsertParams = null;
 
-          // Mock pool.query to simulate DB behavior:
-          // 1st call: SELECT id FROM teams WHERE name = $1 (team_home) -> returns {id: 1}
-          // 2nd call: SELECT id FROM teams WHERE name = $1 (team_away) -> returns {id: 2}
-          // 3rd call: INSERT INTO matches ... RETURNING id -> returns {id: 42}
+          // Mock pool.query to simulate DB behavior. Les équipes sont distinguées par
+          // ORDRE d'appel (l'app cherche d'abord team_home, puis team_away) et non par
+          // nom : robuste même si team_home et team_away sont identiques.
+          // 1st SELECT teams -> {id: 1} (home), 2nd SELECT teams -> {id: 2} (away)
+          // INSERT INTO matches ... RETURNING id -> {id: 42}
+          let teamLookupCount = 0;
           pool.query.mockImplementation((sql, params) => {
             if (sql.includes('SELECT id FROM teams WHERE name')) {
-              // Return a valid team id for any team name lookup
-              if (params[0] === matchData.team_home.trim()) {
-                return Promise.resolve({ rows: [{ id: 1 }] });
-              }
-              if (params[0] === matchData.team_away.trim()) {
-                return Promise.resolve({ rows: [{ id: 2 }] });
-              }
-              return Promise.resolve({ rows: [] });
+              teamLookupCount += 1;
+              return Promise.resolve({ rows: [{ id: teamLookupCount }] });
             }
             if (sql.includes('INSERT INTO matches')) {
               capturedInsertParams = params;
@@ -85,7 +93,7 @@ describe('Feature: capstone-cloud-resilience, Property 1: Round-trip d\'insertio
             date: dateStr,
           };
 
-          const res = await request(app)
+          const res = await request(server)
             .post('/api/data')
             .set('Content-Type', 'application/json')
             .send(payload);

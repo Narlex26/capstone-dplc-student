@@ -1,12 +1,9 @@
 name: CI
 
-# Intégration continue.
-#
-# Stratégie : la CI VERROUILLE ce que l'équipe produit réellement (image Docker +
-# chart Helm). Les tests applicatifs property-based sont FOURNIS dans le starter kit
-# et exercent l'application gelée (consigne : « ne pas modifier les routes »). Certains
-# de leurs générateurs sont non déterministes ; ils tournent donc en INFORMATIF
-# (non bloquant) pour ne pas bloquer le déploiement sur un faux négatif.
+# Intégration continue (tous les jobs sont bloquants) :
+#   - build de l'image Docker (valide le Dockerfile optimisé)
+#   - validation du chart Helm (helm lint + helm template)
+#   - tests applicatifs property-based (déterministes après correction des générateurs)
 on:
   push:
     branches: ["**"]
@@ -49,12 +46,11 @@ jobs:
         run: helm template worldcup helm/worldcup > /dev/null
 
   # ----------------------------------------------------------------
-  # INFORMATIF (non bloquant) — tests fournis de l'application gelée
+  # BLOQUANT — tests applicatifs property-based (jest + PostgreSQL)
   # ----------------------------------------------------------------
   app-tests:
-    name: Tests applicatifs fournis (app gelée — informatif)
+    name: Tests applicatifs (bloquant)
     runs-on: ubuntu-latest
-    continue-on-error: true        # un échec ici ne bloque pas le workflow
     services:
       postgres:
         image: postgres:15
