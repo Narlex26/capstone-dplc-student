@@ -4,9 +4,11 @@ metadata:
   name: svc-express
   namespace: worldcup
 spec:
+  type: nodePort
   selector:
     app: express
   ports:
-  - port: 3000
+  - protocol: TCP
+    port: 80
     targetPort: 3000
-  type: ClusterIP
+    nodePort: 30007
