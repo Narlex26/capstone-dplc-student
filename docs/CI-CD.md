@@ -1,7 +1,8 @@
 # CI/CD — Pipeline GitHub Actions
 
 Pipeline d'industrialisation de l'application Coupe du Monde 2026 sur le cluster
-Kubernetes (k3s single-node, VPS Ikoula).
+Kubernetes (k3s single-node, VPS Ikoula). Déploiement par **manifests Kubernetes bruts**
+(`k8s/`) appliqués avec `kubectl`.
 
 ## Vue d'ensemble
 
@@ -9,77 +10,78 @@ Kubernetes (k3s single-node, VPS Ikoula).
   Développeur                 GitHub Actions                    VPS Ikoula (k3s)
   ───────────                 ──────────────                    ────────────────
    git push  ─────────────▶  ci.yml      (PR + push)
-                              ├─ jest + PostgreSQL
-                              └─ docker build (validation)
+                              ├─ build image Docker
+                              ├─ kubeconform (manifests k8s/)
+                              └─ tests applicatifs (jest + PostgreSQL)
 
    merge main ────────────▶  deploy.yml  (push main)
-                              ├─ docker build
-                              ├─ push image ──▶ ghcr.io/<owner>/<repo>:<sha>
-                              ├─ scp du chart Helm ───────────▶ ~/worldcup-deploy/ (VPS)
-                              └─ SSH ─────────────────────────▶ helm upgrade --install
-                                                                 (k3s : 2 pods + HPA + Ingress + Postgres)
+                              ├─ build image ──▶ ghcr.io/alixsanta/worldcup-app:<sha>
+                              ├─ scp des manifests ───────────▶ ~/worldcup-deploy/k8s (VPS)
+                              └─ SSH ─────────────────────────▶ kubectl apply -f k8s/
+                                                                 + kubectl set image (image du CI)
                                                                  k3s pull l'image ◀── GHCR
 
    bouton manuel ─────────▶  destroy.yml (workflow_dispatch)
-                              └─ SSH ─────────────────────────▶ helm uninstall
+                              └─ SSH ─────────────────────────▶ kubectl delete namespace worldcup
 ```
 
-Couvre le cycle **create / update / destroy** exigé par la grille :
-- `helm upgrade --install` = **create** (1er déploiement) **et update** (déploiements suivants)
-- `helm uninstall` = **destroy**
+Couvre le cycle **create / update / destroy** :
+- `kubectl apply` = **create** (1er déploiement) **et update** (déploiements suivants)
+- `kubectl delete namespace worldcup` = **destroy** (tout part : pods, services, PVC, secret)
 
 ## Les 3 workflows
 
 | Fichier | Déclencheur | Rôle |
 |---------|-------------|------|
-| `.github/workflows/ci.yml` | tout push + PR | **Bloquant** : build image Docker + validation chart Helm (`helm lint`/`template`) + tests applicatifs (jest + PostgreSQL). Ne déploie rien. |
-| `.github/workflows/deploy.yml` | push sur `main` + manuel | Build → push image sur GHCR → copie du chart sur le VPS (scp) → `helm upgrade --install` via SSH. |
-| `.github/workflows/destroy.yml` | manuel (avec confirmation) | `helm uninstall` sur le VPS. |
+| `.github/workflows/ci.yml` | tout push + PR | **Bloquant** : build image Docker + validation des manifests (`kubeconform`) + tests applicatifs (jest + PostgreSQL). Ne déploie rien. |
+| `.github/workflows/deploy.yml` | push sur `main` + manuel | Build → push image sur GHCR → copie des manifests sur le VPS (scp) → `kubectl apply` via SSH. |
+| `.github/workflows/destroy.yml` | manuel (avec confirmation) | `kubectl delete namespace worldcup` sur le VPS. |
 
 ## Choix d'architecture (à défendre en soutenance)
 
-- **Registry = GHCR** (`ghcr.io`) : intégré à GitHub, authentifié par le `GITHUB_TOKEN`
-  automatique → **aucun secret de registre à gérer**.
-- **Déploiement par SSH + Helm** plutôt que kubeconfig exposé : l'API du cluster
+- **Registry = GHCR** (`ghcr.io/alixsanta/worldcup-app`) : le push depuis le CI utilise
+  un **PAT** (`write:packages`) stocké en GitHub Secret ; le pull par k3s est public.
+- **Déploiement par SSH + kubectl** plutôt que kubeconfig exposé : l'API du cluster
   **reste privée**, le runner se contente d'ouvrir une session SSH. Moins de surface
   d'attaque, marche out-of-the-box avec k3s.
-- **Chart envoyé par scp** (pas de `git` sur le VPS) : le runner possède déjà le repo,
-  il copie le chart Helm au moment du déploiement. Le VPS n'a besoin que de `helm`,
+- **Manifests envoyés par scp** (pas de `git` sur le VPS) : le runner possède déjà le
+  repo, il copie le dossier `k8s/` au moment du déploiement. Le VPS n'a besoin que de
   `kubectl` et du kubeconfig — pas de clone, pas de credentials git côté serveur.
-- **Séparation image / chart** : l'**image** (l'artefact applicatif) transite par GHCR ;
-  le **chart Helm** (la recette de déploiement) est copié sur le VPS. Helm lit le chart
-  localement et k3s tire l'image depuis GHCR.
-- **Image taguée par le SHA du commit** : chaque déploiement est traçable et
-  reproductible (rollback = redéployer un ancien SHA).
-- **`--atomic`** : en cas d'échec du déploiement, Helm rollback automatiquement →
-  pas de cluster laissé dans un état cassé.
-- **Pas de credentials en clair dans Git** : tout passe par les *GitHub Secrets* et
-  un *Secret* Kubernetes (critère Sécurité de la grille).
-- **CI 100 % bloquante** : trois jobs verrouillent le pipeline — build de l'image
-  Docker, validation du chart Helm (`helm lint` + `helm template`) et tests applicatifs
-  property-based. Les générateurs de tests fournis avaient des défauts de
-  non-déterminisme (dates `Invalid Date`, collisions de noms d'équipes, race du serveur
-  éphémère de `supertest`) qui ont été corrigés sans toucher au code applicatif — les
-  routes restent intactes. Voir `docs/TESTS-FIXES.md` pour le détail des corrections.
+- **Image injectée par le CI** : le manifest fixe une image par défaut, mais la pipeline
+  l'écrase avec l'image qu'elle vient de construire (`kubectl set image ... <repo>:<sha>`).
+  Chaque déploiement est traçable et reproductible (rollback = redéployer un ancien SHA).
+- **Secret PostgreSQL géré nativement dans le cluster** (Kubernetes Secret
+  `postgres-secret`, créé une fois à la main) : **pas de credentials en clair dans Git**
+  ni dans GitHub. La pipeline n'y touche pas. *Contrepartie* : après un `destroy` qui
+  supprime le namespace, recréer le secret à la main avant un nouveau déploiement
+  (`kubectl create secret generic postgres-secret -n worldcup --from-literal=...`).
+- **CI 100 % bloquante** : build Docker + `kubeconform` + tests applicatifs. Les
+  générateurs des tests fournis avaient des défauts de non-déterminisme corrigés sans
+  toucher au code applicatif (voir `docs/TESTS-FIXES.md`).
 
 ## Configuration requise (une seule fois)
 
 ### 1. Secrets GitHub
 `Settings ▸ Secrets and variables ▸ Actions ▸ New repository secret` :
 
-| Secret | Valeur | Exemple |
-|--------|--------|---------|
-| `VPS_HOST` | IP ou domaine du VPS | `51.x.x.x` |
-| `VPS_USER` | utilisateur SSH dédié au déploiement | `deployer` |
-| `VPS_SSH_KEY` | **clé privée** SSH dédiée (avec en-têtes BEGIN/END) | contenu de `~/.ssh/worldcup_deploy` |
+| Secret | Valeur |
+|--------|--------|
+| `VPS_HOST` | IP du VPS (`178.170.25.224`) |
+| `VPS_USER` | utilisateur SSH dédié au déploiement (`deployer`) |
+| `VPS_SSH_KEY` | **clé privée** SSH dédiée (avec en-têtes BEGIN/END) |
+| `GHCR_USERNAME` | identifiant GitHub propriétaire du package (`alixsanta`) |
+| `GHCR_TOKEN` | PAT avec scope `write:packages` |
 
-> Générer une paire dédiée : `ssh-keygen -t ed25519 -C "github-actions-deploy" -f ~/.ssh/worldcup_deploy -N ""`,
-> ajouter `worldcup_deploy.pub` dans `~/.ssh/authorized_keys` du user `deployer` sur le
-> VPS, et coller `worldcup_deploy` (la privée) dans `VPS_SSH_KEY`.
+> Le Secret PostgreSQL n'est **pas** dans GitHub : il est géré dans le cluster
+> (Kubernetes Secret `postgres-secret`, créé une fois à la main).
+
+> Clé SSH dédiée : `ssh-keygen -t ed25519 -C "github-actions-deploy" -f ~/.ssh/worldcup_deploy -N ""`,
+> puis ajouter `worldcup_deploy.pub` dans `~/.ssh/authorized_keys` du user `deployer` sur
+> le VPS, et coller `worldcup_deploy` (la privée) dans `VPS_SSH_KEY`.
 
 ### 2. Sur le VPS (prérequis côté serveur)
 - Un **utilisateur dédié** `deployer` (non-root, accès par clé uniquement).
-- `helm` et `kubectl` installés et disponibles dans le PATH de `deployer`.
+- `kubectl` installé et disponible dans le PATH de `deployer`.
 - Une **copie du kubeconfig k3s** lisible par `deployer` dans `~/.kube/config` :
   ```bash
   sudo mkdir -p /home/deployer/.kube
@@ -88,14 +90,31 @@ Couvre le cycle **create / update / destroy** exigé par la grille :
   sudo chmod 600 /home/deployer/.kube/config
   ```
 - `metrics-server` actif (inclus par défaut dans k3s) → nécessaire pour le HPA.
-- **Pas besoin de git ni de cloner le repo** : le chart est copié par scp à chaque déploiement.
+- **Pas besoin de git, de Helm, ni de cloner le repo** : les manifests sont copiés par scp.
 
 ### 3. Visibilité de l'image GHCR
 Après le 1er `deploy.yml`, le package apparaît dans
-`github.com/<owner>?tab=packages`. Pour que k3s puisse la tirer sans secret :
+`github.com/<owner>?tab=packages`. Pour que k3s puisse le tirer sans secret :
 **Package ▸ Settings ▸ Change visibility ▸ Public**.
-(Sinon : passer `imagePullSecrets.enabled=true` dans le chart et créer le secret
-`ghcr-creds` côté cluster.)
+
+## Les manifests (`k8s/`)
+
+| Fichier | Ressource |
+|---------|-----------|
+| `namespace.yaml` | Namespace `worldcup` |
+| `express-deployment.yaml` | App (2 réplicas, probes `/api/health/db`) |
+| `express-service.yaml` | Service `svc-express` (ClusterIP) |
+| `hpa.yaml` | Autoscaling CPU 50 % (2→6 réplicas) |
+| `ingress.yaml` | Ingress Traefik (exposition internet) |
+| `postgres-deployment.yaml` | PostgreSQL + init.sql (ConfigMap) |
+| `postgres-service.yaml` | Service `svc-postgres` |
+| `postgres-pvc.yaml` | Volume persistant 5Gi |
+| `postgres-init-configmap.yaml` | ConfigMap `postgres-init-sql` |
+
+> Le Secret `postgres-secret` n'est **pas** dans `k8s/` (pas de credentials dans git) :
+> il est créé une fois à la main dans le cluster (`kubectl create secret generic
+> postgres-secret -n worldcup --from-literal=POSTGRES_USER=... --from-literal=POSTGRES_PASSWORD=...
+> --from-literal=POSTGRES_DB=...`).
 
 ## Démonstration en soutenance
 
@@ -103,8 +122,7 @@ Après le 1er `deploy.yml`, le package apparaît dans
 # 1. UPDATE : un push sur main déclenche un redéploiement automatique
 git commit --allow-empty -m "demo: trigger deploy" && git push
 
-# 2. Suivre le pipeline
-#    onglet Actions du repo GitHub
+# 2. Suivre le pipeline : onglet Actions du repo GitHub
 
 # 3. Vérifier sur le cluster
 kubectl -n worldcup get pods,hpa,ingress
@@ -112,15 +130,13 @@ kubectl -n worldcup get pods,hpa,ingress
 # 4. DESTROY : onglet Actions ▸ Destroy ▸ Run workflow ▸ taper "destroy"
 ```
 
-## Test rapide en local
+## Validation locale des manifests
 
 ```bash
-# Rendu du chart sans l'appliquer
-helm template worldcup ./helm/worldcup
+# Même validation que la CI
+kubeconform -strict -summary -ignore-missing-schemas k8s/
 
 # Déploiement manuel (équivalent de ce que fait la CI)
-helm upgrade --install worldcup ./helm/worldcup \
-  --namespace worldcup --create-namespace \
-  --set app.image.repository=ghcr.io/<owner>/<repo> \
-  --set app.image.tag=latest
+kubectl apply -f k8s/
+kubectl set image deployment/express express=ghcr.io/alixsanta/worldcup-app:latest -n worldcup
 ```

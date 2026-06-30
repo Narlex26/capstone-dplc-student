@@ -2,7 +2,7 @@ name: CI
 
 # Intégration continue (tous les jobs sont bloquants) :
 #   - build de l'image Docker (valide le Dockerfile optimisé)
-#   - validation du chart Helm (helm lint + helm template)
+#   - validation des manifests Kubernetes (kubeconform sur k8s/)
 #   - tests applicatifs property-based (déterministes après correction des générateurs)
 on:
   push:
@@ -15,7 +15,7 @@ jobs:
   # BLOQUANT — valide l'artefact applicatif (le Dockerfile optimisé)
   # ----------------------------------------------------------------
   docker-build:
-    name: Build image Docker (bloquant)
+    name: Build image Docker
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,27 +29,24 @@ jobs:
           tags: worldcup:ci-${{ github.sha }}
 
   # ----------------------------------------------------------------
-  # BLOQUANT — valide le livrable d'infra (le chart Helm)
+  # BLOQUANT — valide le livrable d'infra (les manifests Kubernetes)
   # ----------------------------------------------------------------
-  helm-validate:
-    name: Validation du chart Helm (bloquant)
+  k8s-validate:
+    name: Validation des manifests Kubernetes
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4
-        with:
-          version: v3.16.4
-          token: ${{ github.token }}
-      - name: helm lint
-        run: helm lint helm/worldcup
-      - name: helm template (rendu des manifests)
-        run: helm template worldcup helm/worldcup > /dev/null
+      - name: kubeconform (validation des schémas k8s)
+        run: |
+          VERSION=v0.6.7
+          curl -sSL "https://github.com/yannh/kubeconform/releases/download/${VERSION}/kubeconform-linux-amd64.tar.gz" | tar -xz kubeconform
+          ./kubeconform -strict -summary -ignore-missing-schemas k8s/
 
   # ----------------------------------------------------------------
   # BLOQUANT — tests applicatifs property-based (jest + PostgreSQL)
   # ----------------------------------------------------------------
   app-tests:
-    name: Tests applicatifs (bloquant)
+    name: Tests applicatifs
     runs-on: ubuntu-latest
     services:
       postgres:

@@ -1,6 +1,6 @@
 name: Destroy
 
-# Suppression de l'application déployée (le "destroy" de la grille create/update/destroy).
+# Suppression de l'application déployée (le "destroy" du cycle create/update/destroy).
 # Déclenchement MANUEL uniquement, avec confirmation, pour éviter tout accident.
 on:
   workflow_dispatch:
@@ -12,12 +12,12 @@ on:
 
 jobs:
   destroy:
-    name: Helm uninstall on VPS
+    name: kubectl delete on VPS
     runs-on: ubuntu-latest
     # Garde-fou : ne s'exécute que si l'utilisateur a tapé exactement "destroy".
     if: ${{ github.event.inputs.confirm == 'destroy' }}
     steps:
-      - name: helm uninstall via SSH
+      - name: kubectl delete via SSH
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -25,8 +25,7 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
             set -euo pipefail
-            # Le user deployer (non-root) utilise sa copie du kubeconfig k3s.
             export KUBECONFIG="$HOME/.kube/config"
-            helm uninstall worldcup --namespace worldcup
-            # Supprime aussi le volume persistant de PostgreSQL (sinon il reste).
-            kubectl -n worldcup delete pvc --all --ignore-not-found
+            # Supprime le namespace entier : deployments, services, hpa, ingress,
+            # PVC (données PostgreSQL) et Secret partent avec lui.
+            kubectl delete namespace worldcup --ignore-not-found --wait=true
