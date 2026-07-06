@@ -55,6 +55,15 @@ curl -s 'http://localhost:30090/api/v1/query?query=up{job="express"}'
 kubectl get pods -n monitoring
 ```
 
+## Trade-off de sécurité (assumé)
+
+Prometheus et Grafana sont exposés en **NodePort** sur internet pour faciliter la démo.
+Grafana est protégé par authentification ; **Prometheus n'a pas d'authentification**
+(métriques + API lisibles sans login). Assumé pour le capstone : projet temporaire,
+données non sensibles (stats de matchs/votes publics). *Durcissement possible* : passer
+Prometheus en `ClusterIP` (accès via `kubectl port-forward`), ou filtrer le NodePort au
+niveau firewall.
+
 ## Démo en soutenance
 
 1. Ouvrir Grafana → dashboard « WorldCup 2026 — Observabilité ».
