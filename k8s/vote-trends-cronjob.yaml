@@ -1,0 +1,62 @@
+# ============================================================
+# Job créatif — Snapshot des tendances de vote
+# CronJob planifié qui lit la BDD (teams + votes) et enregistre, à chaque
+# exécution, un instantané horodaté du classement des votes dans la table
+# vote_trends -> permet de suivre l'évolution des pronostics dans le temps.
+# ============================================================
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: vote-trends-snapshot
+  namespace: worldcup
+spec:
+  schedule: "*/5 * * * *"          # toutes les 5 minutes (ajustable)
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: snapshot
+              image: postgres:15-alpine
+              # Connexion via les variables PG* lues automatiquement par psql,
+              # alimentées par le Secret postgres-secret (mêmes credentials que l'app).
+              env:
+                - name: PGHOST
+                  value: svc-postgres
+                - name: PGPORT
+                  value: "5432"
+                - name: PGDATABASE
+                  valueFrom:
+                    secretKeyRef:
+                      name: postgres-secret
+                      key: POSTGRES_DB
+                - name: PGUSER
+                  valueFrom:
+                    secretKeyRef:
+                      name: postgres-secret
+                      key: POSTGRES_USER
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: postgres-secret
+                      key: POSTGRES_PASSWORD
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -e
+                  echo "[vote-trends] snapshot $(date -u +%FT%TZ)"
+                  psql -v ON_ERROR_STOP=1 -c "CREATE TABLE IF NOT EXISTS vote_trends (id SERIAL PRIMARY KEY, snapshot_at TIMESTAMP NOT NULL DEFAULT NOW(), team_id INTEGER NOT NULL, team_name VARCHAR(100) NOT NULL, votes INTEGER NOT NULL, percentage NUMERIC(5,2) NOT NULL); INSERT INTO vote_trends (snapshot_at, team_id, team_name, votes, percentage) SELECT NOW(), t.id, t.name, COUNT(v.id), ROUND(COALESCE(COUNT(v.id)::numeric / NULLIF((SELECT COUNT(*) FROM votes),0) * 100, 0), 2) FROM teams t JOIN votes v ON v.team_id = t.id GROUP BY t.id, t.name;"
+                  echo "[vote-trends] top 5 du dernier snapshot :"
+                  psql -c "SELECT team_name, votes, percentage FROM vote_trends WHERE snapshot_at = (SELECT MAX(snapshot_at) FROM vote_trends) ORDER BY votes DESC LIMIT 5;"
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 200m
+                  memory: 128Mi
